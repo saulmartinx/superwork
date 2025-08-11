@@ -3,6 +3,8 @@ package main
 import (
 	"net/http"
 	"time"
+	limiter "github.com/didip/tollbooth/limiter"
+
 
 	"github.com/NYTimes/gziphandler"
 	"github.com/didip/tollbooth"
@@ -15,7 +17,9 @@ func defineRoutes() *mux.Router {
 	limit := tollbooth.LimitFuncHandler
 
 	{
-		l := tollbooth.NewLimiter(5, time.Second)
+		tollbooth.NewLimiter(1, &limiter.ExpirableOptions{
+    DefaultExpirationTTL: time.Second,
+})
 
 		// Oauth
 		r.Handle("/api/facebook_login_url", limit(l, handleGetFacebookLoginURL)).Methods("GET")
@@ -185,7 +189,9 @@ func defineRoutes() *mux.Router {
 	}
 
 	{
-		l := tollbooth.NewLimiter(10, time.Second)
+		tollbooth.NewLimiter(1, &limiter.ExpirableOptions{
+    DefaultExpirationTTL: time.Second,
+})
 
 		r.PathPrefix("/").Handler(tollbooth.LimitHandler(l, gziphandler.GzipHandler(http.FileServer(http.Dir(config.Public)))))
 	}
