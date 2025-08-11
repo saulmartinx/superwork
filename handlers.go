@@ -24,13 +24,22 @@ func handleGetFacebookLoginURL(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleGetGoogleLoginURL(w http.ResponseWriter, r *http.Request) {
-	state := uuid.NewV4().String()
-	session, _ := store.Get(r, sessionName)
-	session.Values["login_state"] = state
-	session.Save(r, w)
+	// Create the OAuth2 URL with state to prevent CSRF
+	state := uuid.New().String()
 
-	url := googleOauthConf().AuthCodeURL(state)
-	w.Write([]byte(url))
+	session, _ := store.Get(r, sessionName)
+	session.Values["state"] = state
+	if err := session.Save(r, w); err != nil {
+		log.Printf("Failed to save state in session: %v", err)
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		return
+	}
+
+	// Redirect user to Google's OAuth 2.0 consent screen
+	url := googleOauthConf().AuthCodeURL(state, oauth2.AccessTypeOffline)
+	http.Redirect(w, r, url, http.StatusFound)
+}
+
 }
 
 func handleGetOauthCallbackGoogle(w http.ResponseWriter, r *http.Request) {
