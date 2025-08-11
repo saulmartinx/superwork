@@ -1,18 +1,4 @@
-<!doctype html>
-<html>
-  <head><meta charset="utf-8"><title>Superwork</title></head>
-  <body>
-    <h1>Superwork</h1>
-    <div id="status">Checking session…</div>
-    <p><a href="/api/google_login_url">Login with Google</a> · <a href="/api/logout">Logout</a></p>
-    <pre id="me"></pre>
-    <script>
-      fetch('/api/me',{method:'GET'}).then(async r=>{
-        if(r.ok){document.getElementById('status').textContent='Logged in';
-                 document.getElementById('me').textContent=await r.text();}
-        else{document.getElementById('status').textContent='Not logged in';}
-      }).catch(()=>{document.getElementById('status').textContent='Not logged in';});
-    </script>
-  </body>
-</html>
+<a href="#" onclick="fetch('/api/google_login_url')
+  .then(r=>r.text())
+  .then(u=>location.href=u); return false;">Login with Google</a>
 
