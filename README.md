@@ -1,1 +1,1 @@
-[Superwork kasutusjuhend.pdf](https://github.com/user-attachments/files/21709992/Superwork.kasutusjuhend.pdf)
+[Superwork_readme.pdf](https://github.com/user-attachments/files/21710240/Superwork_readme.pdf)
