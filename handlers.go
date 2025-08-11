@@ -34,39 +34,58 @@ func handleGetGoogleLoginURL(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleGetOauthCallbackGoogle(w http.ResponseWriter, r *http.Request) {
-	conf := googleOauthConf()
-
+	// Get the code from the URL
 	code := r.URL.Query().Get("code")
 	if code == "" {
-		http.Error(w, "missing code", http.StatusBadRequest)
+		http.Error(w, "Code not found", http.StatusBadRequest)
 		return
 	}
 
-	ctx := context.Background()
-	tok, err := conf.Exchange(ctx, code)
+	// Exchange code for token
+	token, err := googleOauthConf().Exchange(context.Background(), code)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("token exchange failed: %v", err), http.StatusBadRequest)
+		log.Printf("Token exchange error: %v", err)
+		http.Error(w, "Failed to exchange token", http.StatusInternalServerError)
 		return
 	}
 
-	req, _ := http.NewRequest("GET", "https://openidconnect.googleapis.com/v1/userinfo", nil)
-	req.Header.Set("Authorization", "Bearer "+tok.AccessToken)
-
-	resp, err := http.DefaultClient.Do(req)
+	// Get user info from Google
+	client := googleOauthConf().Client(context.Background(), token)
+	resp, err := client.Get("https://www.googleapis.com/oauth2/v2/userinfo")
 	if err != nil {
-		http.Error(w, fmt.Sprintf("userinfo request failed: %v", err), http.StatusBadGateway)
+		log.Printf("Failed getting user info: %v", err)
+		http.Error(w, "Failed to get user info", http.StatusInternalServerError)
 		return
 	}
 	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != 200 {
-		http.Error(w, fmt.Sprintf("userinfo error %d: %s", resp.StatusCode, string(body)), http.StatusBadGateway)
+	// Decode user info JSON
+	var userInfo struct {
+		ID            string `json:"id"`
+		Email         string `json:"email"`
+		VerifiedEmail bool   `json:"verified_email"`
+		Name          string `json:"name"`
+		GivenName     string `json:"given_name"`
+		FamilyName    string `json:"family_name"`
+		Picture       string `json:"picture"`
+		Locale        string `json:"locale"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&userInfo); err != nil {
+		log.Printf("Failed to decode user info: %v", err)
+		http.Error(w, "Failed to read user info", http.StatusInternalServerError)
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.Write(body)
+	// Store in session (optional)
+	session, _ := store.Get(r, sessionName)
+	session.Values["user_email"] = userInfo.Email
+	session.Values["user_name"] = userInfo.Name
+	if err := session.Save(r, w); err != nil {
+		log.Printf("Failed to save session: %v", err)
+	}
+
+	// Redirect to home or dashboard
+	http.Redirect(w, r, "/", http.StatusFound)
 }
 
 
