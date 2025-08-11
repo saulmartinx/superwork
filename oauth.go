@@ -13,7 +13,7 @@ func facebookOauthConf() *oauth2.Config {
 		RedirectURL:  config.FacebookRedirect,
 		Scopes:       []string{"email"},
 		Endpoint:     facebook.Endpoint,
-	}
+	} 
 }
 
 func googleOauthConf() *oauth2.Config {
