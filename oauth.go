@@ -18,8 +18,8 @@ func facebookOauthConf() *oauth2.Config {
 
 func googleOauthConf() *oauth2.Config {
 	return &oauth2.Config{
-		ClientID:     "116806776326-1l7bm6htqeof2ftl72339j7d49jped0q.apps.googleusercontent.com",
-		ClientSecret: "uMqr7xxUcgY3MJ7_4Ns8YLvB",
+		ClientID:     "694142574846-vje17tjf4dcm6t6v0835l9akld4r8ccm.apps.googleusercontent.com", // uus Client ID
+		ClientSecret: "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", // uus Client Secret
 		RedirectURL:  config.GoogleRedirect,
 		Scopes: []string{
 			"https://www.googleapis.com/auth/userinfo.profile",
