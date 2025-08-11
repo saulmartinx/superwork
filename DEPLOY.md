@@ -1,86 +1,78 @@
-# Deploying Superwork on Render (Free Tier)
+# Deploying Superwork to Render (Free Tier)
 
-This guide shows how to deploy **Superwork** (Go + PostgreSQL) on **Render** with a public URL.
+This guide shows how to deploy the Superwork Go web application and its PostgreSQL database to [Render](https://render.com/) using their free tier. Render offers a free web service instance (512 MB RAM) that can run continuously and a managed PostgreSQL database that is free for 30 days. You will receive a public URL to share with your team.
 
-> TL;DR — Connect your GitHub repo on Render → add a free PostgreSQL → set `DATABASE_URL` and `SUPERWORK_PORT=${PORT}` → run `go build -o superwork ./` and start `./superwork`.
+## Prerequisites
 
----
+- A GitHub repository containing the Superwork code (this repository).  
+- A Render account (sign up at https://render.com). Render does **not** require a credit card for the free tier.
+- The `psql` CLI or another PostgreSQL client installed locally to initialize the database.
 
-## 0) Code note (DATABASE_URL support)
-The repository’s `db_connection.go` should read the Postgres DSN from the environment (e.g. `DATABASE_URL`). If you use the patched file provided, no other code changes are needed. Otherwise, update the code to prefer `os.Getenv("DATABASE_URL")` and fall back to the local dev DSN.
+## Steps
 
----
+### 1. Connect your GitHub repo to Render
 
-## 1) Create the Web Service
-1. Go to **https://render.com** → **New → Web Service** → connect your GitHub repo (the Superwork repo).
-2. **Environment**: keep Docker **off** (native Go build).
-3. **Build Command**:  
-   ```bash
-   go build -o superwork ./
-   ```
-4. **Start Command**:  
-   ```bash
-   ./superwork
-   ```
-Render will provision an URL like `https://<your-app>.onrender.com` with HTTPS.
+1. Log in to your Render dashboard.
+2. Click **New > Web Service** and choose **From a Git Repository**.
+3. Select your `saulmartinx/superwork` repository. Render will detect the Go project automatically.
 
----
+### 2. Configure the web service
 
-## 2) Add PostgreSQL
-1. In Render dashboard: **New → PostgreSQL → Free**.
-2. Open the DB and copy **External Connection** (full URL), e.g.  
-   `postgresql://USER:PASSWORD@HOST:PORT/DB?sslmode=require`
+On the service creation page:
 
-> The free Postgres on Render is for dev; it **expires after ~30 days**. For long‑term use, consider an external free tier (Neon, Supabase, ElephantSQL) and place its URL into `DATABASE_URL`.
+- **Name:** Choose a name for your service.
+- **Build Command:**
 
----
-
-## 3) Configure Environment Variables (Web Service → Environment)
-Set the following keys:
-- `DATABASE_URL=<paste Render DB External Connection string>`
-- `SUPERWORK_PORT=${PORT}`  ← **important**, app must bind Render’s assigned port
-- `SUPERWORK_PUBLIC=public`
-- `SUPERWORK_SECRET=<generate a long random string>`
-
-Optional (if you need these):
-- `SUPERWORK_GEOCODE_API_KEY=<google-geocoding-api-key>`
-- `SUPERWORK_BUGSNAG_API_KEY=<bugsnag-key>`
-- `SUPERWORK_GOOGLE_REDIRECT=https://<your-app>.onrender.com/api/oauth2callback/google`
-- `SUPERWORK_FACEBOOK_REDIRECT=https://<your-app>.onrender.com/api/oauth2callback/facebook`
-
-Click **Save**.
-
----
-
-## 4) Initialize the Database Schema
-From your local machine (Windows):
-- Install **psql** (PostgreSQL client) or use a GUI (DBeaver/TablePlus).
-- Run the schema against the managed DB:
-  ```powershell
-  psql "<DATABASE_URL_FROM_RENDER>" -f db/setup.sql
+  ```bash
+  go build -o superwork ./
   ```
-> Ensure the URL includes `sslmode=require` (Render default). If using a GUI, open the connection and execute `db/setup.sql` there.
 
----
+- **Start Command:**
 
-## 5) Deploy & Test
-- **Auto deploy:** push to `main` → Render builds & deploys automatically.
-- **Manual:** press **Deploy** in Render dashboard.
-- Open your URL and sign up/login. You should see the Superwork UI.
+  ```bash
+  ./superwork
+  ```
 
----
+- **Environment Variables:** Add the following key‑value pairs (click **Advanced > Environment** to add them):
 
-## Troubleshooting
-- **DB connection errors** → verify `DATABASE_URL`, and that `db/setup.sql` was executed.
-- **Port/bind error** → make sure `SUPERWORK_PORT=${PORT}` is set.
-- **Cold start delay** → free services may sleep after inactivity; first request can be slower.
-- **Static files** → `public/` is served by the app; keep `SUPERWORK_PUBLIC=public`.
+  | Key                   | Value                                               | Notes                                            |
+  |----------------------|------------------------------------------------------|--------------------------------------------------|
+  | `SUPERWORK_PORT`     | `${PORT}`                                            | Render assigns an internal port via `$PORT`; pass it to the app. |
+  | `SUPERWORK_PUBLIC`   | `public`                                             | Static assets directory.                         |
+  | `SUPERWORK_SECRET`   | _a long random string_                               | Secret for session cookies; change for production. |
+  | `DATABASE_URL`       | (leave blank for now)                                | Will be set by Render when you add the database. |
 
----
+Leave other configuration options at their defaults. Click **Create Web Service** when done. Render will start an initial build (it will fail until the database is configured; that’s okay).
 
-## Notes & Alternatives
-- **Security**: always set a strong `SUPERWORK_SECRET` before exposing the app.
-- **External DBs**: for persistence beyond Render’s ~30 days, use Neon/Supabase/ElephantSQL and keep the same `DATABASE_URL` interface.
-- **Fly.io alternative**: more “always‑on” free resources and managed Postgres, but requires a credit card on signup.
+### 3. Add a PostgreSQL database
 
-Good luck!
+1. From the Render dashboard, click **New > PostgreSQL**.
+2. Give the database a name (e.g., `superwork-db`) and choose the **Free** plan.
+3. After creation, go to the database details page and note the **Internal URL** and **External URL**. Render will automatically inject the `DATABASE_URL` environment variable into your web service with the internal connection string.
+
+### 4. Initialize the database schema
+
+To create the tables, run the SQL setup script against the new database. You can do this from your local machine:
+
+```bash
+# Replace <EXTERNAL_URL> with the URL shown in the Render dashboard (be sure to include the credentials and database name)
+psql "<EXTERNAL_URL>" -f db/setup.sql
+```
+
+This loads all necessary tables, triggers, and sample data (and enables the `pgcrypto` extension). If you don't have `psql` installed, you can use a GUI like DBeaver to connect using the External URL and execute `db/setup.sql` there.
+
+### 5. Redeploy the service
+
+Return to your Superwork web service on Render and click **Manual Deploy > Deploy latest commit**. The service will build and start successfully now that the database exists. Within a minute or two, Render will assign a public URL such as `https://superwork.onrender.com`.
+
+### 6. Verify the deployment
+
+Open the provided URL in your browser. You should see the Superwork login page. Sign up or sign in (if you configured OAuth, you can use Google or Facebook). Then create workflows, clients, tasks, etc., as described in the project README.
+
+## Notes
+
+- **Database expiration:** Render’s free PostgreSQL instances last for 30 days. Before the end of the term, you can upgrade to a paid plan or recreate the database (export data if needed). Alternatively, connect an external free Postgres provider such as [Neon](https://neon.tech/) or [Supabase](https://supabase.com/) by setting the `DATABASE_URL` manually.
+- **Environment variables:** The application also honors `SUPERWORK_GEOCODE_API_KEY`, `SUPERWORK_BUGSNAG_API_KEY`, `SUPERWORK_ADMIN_EMAIL`, and related variables. Set these if you need geocoding, error monitoring, or outgoing email.
+- **Local testing:** To run the app locally, use the provided `Makefile` or run `go build` then `./superwork`. Create a local database (named `superwork`) and load `db/setup.sql`. The local connection string defaults to `user=superwork dbname=superwork sslmode=disable`.
+
+You are now ready to host Superwork with a public URL. Happy managing!

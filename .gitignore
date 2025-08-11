@@ -1,0 +1,5 @@
+superwork
+superwork_linux
+*.log
+dist
+coverage.out
