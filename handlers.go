@@ -24,77 +24,49 @@ func handleGetFacebookLoginURL(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleGetGoogleLoginURL(w http.ResponseWriter, r *http.Request) {
-	// Create the OAuth2 URL with state to prevent CSRF
-	state := uuid.New().String()
-
+	state := uuid.NewV4().String()
 	session, _ := store.Get(r, sessionName)
-	session.Values["state"] = state
-	if err := session.Save(r, w); err != nil {
-		log.Printf("Failed to save state in session: %v", err)
-		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
-		return
-	}
+	session.Values["login_state"] = state
+	session.Save(r, w)
 
-	// Redirect user to Google's OAuth 2.0 consent screen
-	url := googleOauthConf().AuthCodeURL(state, oauth2.AccessTypeOffline)
-	http.Redirect(w, r, url, http.StatusFound)
-}
-
+	url := googleOauthConf().AuthCodeURL(state)
+	w.Write([]byte(url))
 }
 
 func handleGetOauthCallbackGoogle(w http.ResponseWriter, r *http.Request) {
-	// Get the code from the URL
+	conf := googleOauthConf()
+
 	code := r.URL.Query().Get("code")
 	if code == "" {
-		http.Error(w, "Code not found", http.StatusBadRequest)
+		http.Error(w, "missing code", http.StatusBadRequest)
 		return
 	}
 
-	// Exchange code for token
-	token, err := googleOauthConf().Exchange(context.Background(), code)
+	ctx := context.Background()
+	tok, err := conf.Exchange(ctx, code)
 	if err != nil {
-		log.Printf("Token exchange error: %v", err)
-		http.Error(w, "Failed to exchange token", http.StatusInternalServerError)
+		http.Error(w, fmt.Sprintf("token exchange failed: %v", err), http.StatusBadRequest)
 		return
 	}
 
-	// Get user info from Google
-	client := googleOauthConf().Client(context.Background(), token)
-	resp, err := client.Get("https://www.googleapis.com/oauth2/v2/userinfo")
+	req, _ := http.NewRequest("GET", "https://openidconnect.googleapis.com/v1/userinfo", nil)
+	req.Header.Set("Authorization", "Bearer "+tok.AccessToken)
+
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		log.Printf("Failed getting user info: %v", err)
-		http.Error(w, "Failed to get user info", http.StatusInternalServerError)
+		http.Error(w, fmt.Sprintf("userinfo request failed: %v", err), http.StatusBadGateway)
 		return
 	}
 	defer resp.Body.Close()
 
-	// Decode user info JSON
-	var userInfo struct {
-		ID            string `json:"id"`
-		Email         string `json:"email"`
-		VerifiedEmail bool   `json:"verified_email"`
-		Name          string `json:"name"`
-		GivenName     string `json:"given_name"`
-		FamilyName    string `json:"family_name"`
-		Picture       string `json:"picture"`
-		Locale        string `json:"locale"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&userInfo); err != nil {
-		log.Printf("Failed to decode user info: %v", err)
-		http.Error(w, "Failed to read user info", http.StatusInternalServerError)
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		http.Error(w, fmt.Sprintf("userinfo error %d: %s", resp.StatusCode, string(body)), http.StatusBadGateway)
 		return
 	}
 
-	// Store in session (optional)
-	session, _ := store.Get(r, sessionName)
-	session.Values["user_email"] = userInfo.Email
-	session.Values["user_name"] = userInfo.Name
-	if err := session.Save(r, w); err != nil {
-		log.Printf("Failed to save session: %v", err)
-	}
-
-	// Redirect to home or dashboard
-	http.Redirect(w, r, "/", http.StatusFound)
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Write(body)
 }
 
 
