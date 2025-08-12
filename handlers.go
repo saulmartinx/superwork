@@ -32,9 +32,10 @@ func handleGetGoogleLoginURL(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(url))
 }
 
-func handleGetOauthCallback(url string, conf *oauth2.Config, w http.ResponseWriter, r *http.Request) {
-	code := r.URL.Query().Get("code")
-	state := r.URL.Query().Get("state")
+func handleGetOauthCallbackGoogle(w http.ResponseWriter, r *http.Request) {
+    handleGetOauthCallback("https://www.googleapis.com/oauth2/v2/userinfo", googleOauthConf(), w, r)
+}
+
 
 	session, _ := store.Get(r, sessionName)
 	if session.Values["login_state"] != state {
