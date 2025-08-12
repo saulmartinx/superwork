@@ -13,44 +13,52 @@ import (
 	"golang.org/x/oauth2"
 )
 
+// --- OAUTH: LOGIN URL-id ---
+
 func handleGetFacebookLoginURL(w http.ResponseWriter, r *http.Request) {
 	state := uuid.NewV4().String()
 	session, _ := store.Get(r, sessionName)
 	session.Values["login_state"] = state
-	session.Save(r, w)
+	_ = session.Save(r, w)
 
 	url := facebookOauthConf().AuthCodeURL(state)
 	w.Write([]byte(url))
 }
 
 func handleGetGoogleLoginURL(w http.ResponseWriter, r *http.Request) {
-	// Create the OAuth2 URL with state to prevent CSRF
-	state := uuid.New().String()
-
+	// CSRF state
+	state := uuid.NewV4().String()
 	session, _ := store.Get(r, sessionName)
-	session.Values["state"] = state
+	session.Values["login_state"] = state
 	if err := session.Save(r, w); err != nil {
 		log.Printf("Failed to save state in session: %v", err)
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		return
 	}
 
-	// Redirect user to Google's OAuth 2.0 consent screen
+	// Google consent
 	url := googleOauthConf().AuthCodeURL(state, oauth2.AccessTypeOffline)
 	http.Redirect(w, r, url, http.StatusFound)
 }
 
-}
+// --- OAUTH: GOOGLE CALLBACK ---
 
 func handleGetOauthCallbackGoogle(w http.ResponseWriter, r *http.Request) {
-	// Get the code from the URL
+	// Kontrolli state
+	session, _ := store.Get(r, sessionName)
+	expectedState, _ := session.Values["login_state"].(string)
+	if expectedState == "" || r.URL.Query().Get("state") != expectedState {
+		http.Error(w, "Invalid state", http.StatusBadRequest)
+		return
+	}
+
 	code := r.URL.Query().Get("code")
 	if code == "" {
 		http.Error(w, "Code not found", http.StatusBadRequest)
 		return
 	}
 
-	// Exchange code for token
+	// code -> token
 	token, err := googleOauthConf().Exchange(context.Background(), code)
 	if err != nil {
 		log.Printf("Token exchange error: %v", err)
@@ -58,7 +66,7 @@ func handleGetOauthCallbackGoogle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get user info from Google
+	// Küsi Google userinfo
 	client := googleOauthConf().Client(context.Background(), token)
 	resp, err := client.Get("https://www.googleapis.com/oauth2/v2/userinfo")
 	if err != nil {
@@ -68,7 +76,6 @@ func handleGetOauthCallbackGoogle(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 
-	// Decode user info JSON
 	var userInfo struct {
 		ID            string `json:"id"`
 		Email         string `json:"email"`
@@ -85,65 +92,19 @@ func handleGetOauthCallbackGoogle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Store in session (optional)
-	session, _ := store.Get(r, sessionName)
-	session.Values["user_email"] = userInfo.Email
-	session.Values["user_name"] = userInfo.Name
-	if err := session.Save(r, w); err != nil {
-		log.Printf("Failed to save session: %v", err)
-	}
-
-	// Redirect to home or dashboard
-	http.Redirect(w, r, "/", http.StatusFound)
-}
-
-
-	log.Println("getting oauth data from", url)
-
-	client := conf.Client(oauth2.NoContext, tok)
-	resp, err := client.Get(url)
-	if err != nil {
-		log.Println(err)
-		http.Error(w, "Error getting oauth user data", http.StatusInternalServerError)
-		return
-	}
-
-	var profile map[string]interface{}
-	if err := json.NewDecoder(resp.Body).Decode(&profile); err != nil {
-		log.Println(err)
-		http.Error(w, "Error reading oauth user data", http.StatusInternalServerError)
-		return
-	}
-
-	log.Println("oauth response", profile)
-
-	email := profile["email"].(string)
-	name := profile["name"].(string)
-	picture := ""
-	if s, isString := profile["picture"].(string); isString {
-		// Google
-		picture = s
-	} else if pic, isMap := profile["picture"].(map[string]interface{}); isMap {
-		// Facebook
-		if data, isMap := pic["data"].(map[string]interface{}); isMap {
-			if s, isString = data["url"].(string); isString {
-				picture = s
-			}
-		}
-	}
-	user, err := selectUserByEmail(email)
+	// Upsert kasutaja DB-s
+	user, err := selectUserByEmail(userInfo.Email)
 	if err != nil {
 		log.Println(err)
 		http.Error(w, "Error loading user data", http.StatusInternalServerError)
 		return
 	}
-
-	if nil == user {
-		user = &User{}
-		user.Email = email
-		user.Name = name
-		user.Picture = &picture
-
+	if user == nil {
+		user = &User{
+			Email:   userInfo.Email,
+			Name:    userInfo.Name,
+			Picture: &userInfo.Picture,
+		}
 		company := Company{}
 		if user.Name == "" {
 			company.Name = user.Email + " company"
@@ -155,40 +116,31 @@ func handleGetOauthCallbackGoogle(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Error creating company", http.StatusInternalServerError)
 			return
 		}
-
 		user.ActiveCompanyID = company.ID
 		if err := insertUser(user); err != nil {
 			log.Println(err)
 			http.Error(w, "Error inserting user data", http.StatusInternalServerError)
 			return
 		}
-
-		timeline := Timeline{
+		if err := insertTimeline(&Timeline{
 			UnderCompanyID: company.ID,
 			UserID:         user.ID,
 			CompanyID:      company.ID,
 			Action:         "created",
-		}
-		timeline.Name = company.Name
-		if err := insertTimeline(&timeline); err != nil {
+			Name:           company.Name,
+		}); err != nil {
 			log.Println(err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-
-		companyUser := CompanyUser{
-			CompanyID: company.ID,
-			UserID:    user.ID,
-		}
-		if err := insertCompanyUser(&companyUser); err != nil {
+		if err := insertCompanyUser(&CompanyUser{CompanyID: company.ID, UserID: user.ID}); err != nil {
 			log.Println(err)
 			http.Error(w, "Error creating company user", http.StatusInternalServerError)
 			return
 		}
-
 	} else {
-		user.Name = name
-		user.Picture = &picture
+		user.Name = userInfo.Name
+		user.Picture = &userInfo.Picture
 		if err := updateUser(*user); err != nil {
 			log.Println("Error updating user", err)
 			http.Error(w, "Error updating user data", http.StatusInternalServerError)
@@ -196,8 +148,9 @@ func handleGetOauthCallbackGoogle(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Sisselogimise sessioon
 	session.Values["user_id"] = user.ID
-	session.Save(r, w)
+	_ = session.Save(r, w)
 
 	if err := populateUser(*user); err != nil {
 		log.Println(err)
@@ -208,21 +161,16 @@ func handleGetOauthCallbackGoogle(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/", http.StatusFound)
 }
 
-func handleGetOauthCallbackGoogle(w http.ResponseWriter, r *http.Request) {
-	handleGetOauthCallback("https://www.googleapis.com/oauth2/v1/userinfo", googleOauthConf(), w, r)
-}
-
-func handleGetOauthCallbackFacebook(w http.ResponseWriter, r *http.Request) {
-	handleGetOauthCallback("https://graph.facebook.com/me?fields=name,email,picture.type(large)", facebookOauthConf(), w, r)
-}
+// --- LOGOUT ---
 
 func handleGetLogout(w http.ResponseWriter, r *http.Request) {
 	session, _ := store.Get(r, sessionName)
 	session.Values["user_id"] = nil
 	session.Save(r, w)
-
 	http.Redirect(w, r, "/", http.StatusFound)
 }
+
+// --- ME ---
 
 func handleGetMe(w http.ResponseWriter, r *http.Request, user *User) {
 	w.Write(must(json.Marshal(user)))
@@ -290,7 +238,6 @@ func handlePostMe(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Check for existing user
-
 	existingUser, err := selectUserByEmail(input.Email)
 	if err != nil {
 		log.Println(err)
@@ -298,7 +245,7 @@ func handlePostMe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if existingUser != nil {
-		// Check if password matches with the existing user. If yes, just log the user in
+		// Password match → login
 		err := bcrypt.CompareHashAndPassword([]byte(existingUser.PasswordHash), []byte(input.Password))
 		if err == nil {
 			session, _ := store.Get(r, sessionName)
@@ -320,7 +267,6 @@ func handlePostMe(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// New user
-
 	var user User
 	user.Email = input.Email
 	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(input.Password), bcrypt.DefaultCost)
@@ -387,6 +333,8 @@ func handlePostMe(w http.ResponseWriter, r *http.Request) {
 
 	w.Write(must(json.Marshal(user)))
 }
+
+// --- ACTIVATION ---
 
 func handleGetActivation(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
@@ -459,6 +407,8 @@ func handlePostActivation(w http.ResponseWriter, r *http.Request) {
 	w.Write(must(json.Marshal(user)))
 }
 
+// --- STATS ---
+
 func handleStats(w http.ResponseWriter, r *http.Request) {
 	stats, err := selectStats()
 	if err != nil {
@@ -468,6 +418,8 @@ func handleStats(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Write(must(json.MarshalIndent(stats, "", "  ")))
 }
+
+// --- COMPANY USERS ---
 
 func handleGetCompanyUsers(w http.ResponseWriter, r *http.Request, user *User) {
 	models, err := selectCompanyUsersByCompany(user.ActiveCompanyID)
@@ -521,8 +473,6 @@ func handlePostCompanyUsers(w http.ResponseWriter, r *http.Request, user *User) 
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		// this user has no password and no means to log in (except with FB/Google).
-		// so send it an account activation link
 		activation := Activation{}
 		activation.UserID = newUser.ID
 		if err := insertActivation(&activation); err != nil {
@@ -537,7 +487,6 @@ func handlePostCompanyUsers(w http.ResponseWriter, r *http.Request, user *User) 
 			fmt.Sprintf("%s (%s) added you to company %s on http://superwork.io. Activate your account by visiting http://superwork.io/#activate/%s",
 				user.Name, user.Email, company.Name, activation.ID))
 	} else {
-		// this user can already log in. just let it know that it was added to the company
 		go sendEmail(
 			newUser.Email,
 			fmt.Sprintf("%s (%s) added you to company %s.",
@@ -622,6 +571,8 @@ func handleDeleteCompanyUser(w http.ResponseWriter, r *http.Request, user *User)
 	w.Write(must(json.Marshal("ok")))
 }
 
+// --- TIMELINE ---
+
 func handleGetTimeline(w http.ResponseWriter, r *http.Request, user *User) {
 	models, err := selectTimelineByCompany(user.ActiveCompanyID)
 	if err != nil {
@@ -661,6 +612,8 @@ func handleGetDeletedObjects(w http.ResponseWriter, r *http.Request, user *User)
 
 	w.Write(must(json.Marshal(models)))
 }
+
+// --- COMPANIES ---
 
 func handleGetCompanies(w http.ResponseWriter, r *http.Request, user *User) {
 	models, err := selectCompaniesByUser(user.ID)
@@ -762,6 +715,8 @@ func handleDeleteCompany(w http.ResponseWriter, r *http.Request, user *User) {
 
 	w.Write(must(json.Marshal("ok")))
 }
+
+// --- ACTIVITIES ---
 
 func handleGetActivities(w http.ResponseWriter, r *http.Request, user *User) {
 	taskID := r.URL.Query().Get("task_id")
@@ -925,17 +880,12 @@ func handleDeleteActivity(w http.ResponseWriter, r *http.Request, user *User) {
 	w.Write(must(json.Marshal("ok")))
 }
 
-func handleGetActivityFields(w http.ResponseWriter, r *http.Request, user *User) {
-}
+// --- ACTIVITY FIELDS / TYPES (stubs) ---
 
-func handlePostActivityFields(w http.ResponseWriter, r *http.Request, user *User) {
-}
-
-func handlePutActivityField(w http.ResponseWriter, r *http.Request, user *User) {
-}
-
-func handleDeleteActivityField(w http.ResponseWriter, r *http.Request, user *User) {
-}
+func handleGetActivityFields(w http.ResponseWriter, r *http.Request, user *User) {}
+func handlePostActivityFields(w http.ResponseWriter, r *http.Request, user *User) {}
+func handlePutActivityField(w http.ResponseWriter, r *http.Request, user *User)  {}
+func handleDeleteActivityField(w http.ResponseWriter, r *http.Request, user *User) {}
 
 func handleGetActivityTypes(w http.ResponseWriter, r *http.Request, user *User) {
 	models, err := selectActivityTypesByCompany(user.ActiveCompanyID)
@@ -944,18 +894,13 @@ func handleGetActivityTypes(w http.ResponseWriter, r *http.Request, user *User) 
 		log.Println(err)
 		return
 	}
-
 	w.Write(must(json.Marshal(models)))
 }
+func handlePostActivityTypes(w http.ResponseWriter, r *http.Request, user *User) {}
+func handlePutActivityType(w http.ResponseWriter, r *http.Request, user *User)  {}
+func handleDeleteActivityType(w http.ResponseWriter, r *http.Request, user *User) {}
 
-func handlePostActivityTypes(w http.ResponseWriter, r *http.Request, user *User) {
-}
-
-func handlePutActivityType(w http.ResponseWriter, r *http.Request, user *User) {
-}
-
-func handleDeleteActivityType(w http.ResponseWriter, r *http.Request, user *User) {
-}
+// --- CURRENCIES (stubbed) ---
 
 func handleGetCurrencies(w http.ResponseWriter, r *http.Request, user *User) {
 	models, err := selectCurrenciesByCompany(user.ActiveCompanyID)
@@ -966,15 +911,11 @@ func handleGetCurrencies(w http.ResponseWriter, r *http.Request, user *User) {
 	}
 	w.Write(must(json.Marshal(models)))
 }
+func handlePostCurrencies(w http.ResponseWriter, r *http.Request, user *User) {}
+func handlePutCurrency(w http.ResponseWriter, r *http.Request, user *User)   {}
+func handleDeleteCurrency(w http.ResponseWriter, r *http.Request, user *User) {}
 
-func handlePostCurrencies(w http.ResponseWriter, r *http.Request, user *User) {
-}
-
-func handlePutCurrency(w http.ResponseWriter, r *http.Request, user *User) {
-}
-
-func handleDeleteCurrency(w http.ResponseWriter, r *http.Request, user *User) {
-}
+// --- TASKS ---
 
 func handleGetTasks(w http.ResponseWriter, r *http.Request, user *User) {
 	personID := r.URL.Query().Get("person_id")
@@ -1149,53 +1090,31 @@ func handleDeleteTask(w http.ResponseWriter, r *http.Request, user *User) {
 	w.Write(must(json.Marshal("ok")))
 }
 
-func handleGetTaskFields(w http.ResponseWriter, r *http.Request, user *User) {
-}
+// --- TASK FIELDS (stubs) ---
 
-func handlePostTaskFields(w http.ResponseWriter, r *http.Request, user *User) {
-}
+func handleGetTaskFields(w http.ResponseWriter, r *http.Request, user *User)  {}
+func handlePostTaskFields(w http.ResponseWriter, r *http.Request, user *User) {}
+func handlePutTaskField(w http.ResponseWriter, r *http.Request, user *User)   {}
+func handleDeleteTaskField(w http.ResponseWriter, r *http.Request, user *User) {}
 
-func handlePutTaskField(w http.ResponseWriter, r *http.Request, user *User) {
-}
+// --- FILES / FILTERS / GOALS (stubs) ---
 
-func handleDeleteTaskField(w http.ResponseWriter, r *http.Request, user *User) {
-}
+func handleGetFiles(w http.ResponseWriter, r *http.Request, user *User)       {}
+func handlePostFiles(w http.ResponseWriter, r *http.Request, user *User)      {}
+func handlePutFile(w http.ResponseWriter, r *http.Request, user *User)        {}
+func handleDeleteFile(w http.ResponseWriter, r *http.Request, user *User)     {}
 
-func handleGetFiles(w http.ResponseWriter, r *http.Request, user *User) {
-}
+func handleGetFilters(w http.ResponseWriter, r *http.Request, user *User)     {}
+func handlePostFilters(w http.ResponseWriter, r *http.Request, user *User)    {}
+func handlePutFilter(w http.ResponseWriter, r *http.Request, user *User)      {}
+func handleDeleteFilter(w http.ResponseWriter, r *http.Request, user *User)   {}
 
-func handlePostFiles(w http.ResponseWriter, r *http.Request, user *User) {
-}
+func handleGetGoals(w http.ResponseWriter, r *http.Request, user *User)       {}
+func handlePostGoals(w http.ResponseWriter, r *http.Request, user *User)      {}
+func handlePutGoal(w http.ResponseWriter, r *http.Request, user *User)        {}
+func handleDeleteGoal(w http.ResponseWriter, r *http.Request, user *User)     {}
 
-func handlePutFile(w http.ResponseWriter, r *http.Request, user *User) {
-}
-
-func handleDeleteFile(w http.ResponseWriter, r *http.Request, user *User) {
-}
-
-func handleGetFilters(w http.ResponseWriter, r *http.Request, user *User) {
-}
-
-func handlePostFilters(w http.ResponseWriter, r *http.Request, user *User) {
-}
-
-func handlePutFilter(w http.ResponseWriter, r *http.Request, user *User) {
-}
-
-func handleDeleteFilter(w http.ResponseWriter, r *http.Request, user *User) {
-}
-
-func handleGetGoals(w http.ResponseWriter, r *http.Request, user *User) {
-}
-
-func handlePostGoals(w http.ResponseWriter, r *http.Request, user *User) {
-}
-
-func handlePutGoal(w http.ResponseWriter, r *http.Request, user *User) {
-}
-
-func handleDeleteGoal(w http.ResponseWriter, r *http.Request, user *User) {
-}
+// --- NOTES ---
 
 func handleGetNotes(w http.ResponseWriter, r *http.Request, user *User) {
 	taskID := r.URL.Query().Get("task_id")
@@ -1256,8 +1175,7 @@ func handlePostNotes(w http.ResponseWriter, r *http.Request, user *User) {
 	w.Write(must(json.Marshal(input)))
 }
 
-func handlePutNote(w http.ResponseWriter, r *http.Request, user *User) {
-}
+func handlePutNote(w http.ResponseWriter, r *http.Request, user *User) {}
 
 func handleDeleteNote(w http.ResponseWriter, r *http.Request, user *User) {
 	vars := mux.Vars(r)
@@ -1292,29 +1210,19 @@ func handleDeleteNote(w http.ResponseWriter, r *http.Request, user *User) {
 	w.Write(must(json.Marshal("ok")))
 }
 
-func handleGetNoteFields(w http.ResponseWriter, r *http.Request, user *User) {
-}
+func handleGetNoteFields(w http.ResponseWriter, r *http.Request, user *User)  {}
+func handlePostNoteFields(w http.ResponseWriter, r *http.Request, user *User) {}
+func handlePutNoteField(w http.ResponseWriter, r *http.Request, user *User)   {}
+func handleDeleteNoteField(w http.ResponseWriter, r *http.Request, user *User) {}
 
-func handlePostNoteFields(w http.ResponseWriter, r *http.Request, user *User) {
-}
+// --- CATEGORIES (stubs) ---
 
-func handlePutNoteField(w http.ResponseWriter, r *http.Request, user *User) {
-}
+func handleGetCategories(w http.ResponseWriter, r *http.Request, user *User)  {}
+func handlePostCategories(w http.ResponseWriter, r *http.Request, user *User) {}
+func handlePutCategory(w http.ResponseWriter, r *http.Request, user *User)    {}
+func handleDeleteCategory(w http.ResponseWriter, r *http.Request, user *User) {}
 
-func handleDeleteNoteField(w http.ResponseWriter, r *http.Request, user *User) {
-}
-
-func handleGetCategories(w http.ResponseWriter, r *http.Request, user *User) {
-}
-
-func handlePostCategories(w http.ResponseWriter, r *http.Request, user *User) {
-}
-
-func handlePutCategory(w http.ResponseWriter, r *http.Request, user *User) {
-}
-
-func handleDeleteCategory(w http.ResponseWriter, r *http.Request, user *User) {
-}
+// --- ORGANIZATIONS ---
 
 func handleGetOrganizations(w http.ResponseWriter, r *http.Request, user *User) {
 	models, err := selectOrganizationsByCompany(user.ActiveCompanyID)
@@ -1436,29 +1344,16 @@ func handleDeleteOrganization(w http.ResponseWriter, r *http.Request, user *User
 	w.Write(must(json.Marshal("ok")))
 }
 
-func handleGetOrganizationFields(w http.ResponseWriter, r *http.Request, user *User) {
-}
+func handleGetOrganizationFields(w http.ResponseWriter, r *http.Request, user *User)     {}
+func handlePostOrganizationFields(w http.ResponseWriter, r *http.Request, user *User)    {}
+func handlePutOrganizationField(w http.ResponseWriter, r *http.Request, user *User)      {}
+func handleDeleteOrganizationField(w http.ResponseWriter, r *http.Request, user *User)   {}
+func handleGetOrganizationRelationships(w http.ResponseWriter, r *http.Request, user *User) {}
+func handlePostOrganizationRelationships(w http.ResponseWriter, r *http.Request, user *User) {}
+func handlePutOrganizationRelationship(w http.ResponseWriter, r *http.Request, user *User)   {}
+func handleDeleteOrganizationRelationship(w http.ResponseWriter, r *http.Request, user *User) {}
 
-func handlePostOrganizationFields(w http.ResponseWriter, r *http.Request, user *User) {
-}
-
-func handlePutOrganizationField(w http.ResponseWriter, r *http.Request, user *User) {
-}
-
-func handleDeleteOrganizationField(w http.ResponseWriter, r *http.Request, user *User) {
-}
-
-func handleGetOrganizationRelationships(w http.ResponseWriter, r *http.Request, user *User) {
-}
-
-func handlePostOrganizationRelationships(w http.ResponseWriter, r *http.Request, user *User) {
-}
-
-func handlePutOrganizationRelationship(w http.ResponseWriter, r *http.Request, user *User) {
-}
-
-func handleDeleteOrganizationRelationship(w http.ResponseWriter, r *http.Request, user *User) {
-}
+// --- CONTACTS ---
 
 func handleGetContacts(w http.ResponseWriter, r *http.Request, user *User) {
 	personID := r.URL.Query().Get("person_id")
@@ -1570,6 +1465,8 @@ func handleDeleteContact(w http.ResponseWriter, r *http.Request, user *User) {
 	w.Write(must(json.Marshal("ok")))
 }
 
+// --- PERSONS ---
+
 func handleGetPerson(w http.ResponseWriter, r *http.Request, user *User) {
 	vars := mux.Vars(r)
 	ID := vars["id"]
@@ -1641,11 +1538,8 @@ func handlePostPersons(w http.ResponseWriter, r *http.Request, user *User) {
 	}
 
 	if input.Phone != "" {
-		contact := Contact{
-			PersonID: input.ID,
-		}
+		contact := Contact{PersonID: input.ID}
 		contact.Name = input.Phone
-
 		timeline := Timeline{
 			UnderCompanyID: user.ActiveCompanyID,
 			UserID:         user.ID,
@@ -1661,11 +1555,8 @@ func handlePostPersons(w http.ResponseWriter, r *http.Request, user *User) {
 	}
 
 	if input.Email != "" {
-		contact := Contact{
-			PersonID: input.ID,
-		}
+		contact := Contact{PersonID: input.ID}
 		contact.Name = input.Email
-
 		timeline := Timeline{
 			UnderCompanyID: user.ActiveCompanyID,
 			UserID:         user.ID,
@@ -1766,17 +1657,7 @@ func handleDeletePerson(w http.ResponseWriter, r *http.Request, user *User) {
 	w.Write(must(json.Marshal("ok")))
 }
 
-func handleGetPersonFields(w http.ResponseWriter, r *http.Request, user *User) {
-}
-
-func handlePostPersonFields(w http.ResponseWriter, r *http.Request, user *User) {
-}
-
-func handlePutPersonField(w http.ResponseWriter, r *http.Request, user *User) {
-}
-
-func handleDeletePersonField(w http.ResponseWriter, r *http.Request, user *User) {
-}
+// --- WORKFLOWS / STAGES ---
 
 func handleGetWorkflows(w http.ResponseWriter, r *http.Request, user *User) {
 	models, err := selectWorkflowsByCompany(user.ActiveCompanyID)
@@ -1895,57 +1776,10 @@ func handleDeleteWorkflow(w http.ResponseWriter, r *http.Request, user *User) {
 	w.Write(must(json.Marshal("ok")))
 }
 
-func handleGetPrices(w http.ResponseWriter, r *http.Request, user *User) {
-}
-
-func handlePostPrices(w http.ResponseWriter, r *http.Request, user *User) {
-}
-
-func handlePutPrice(w http.ResponseWriter, r *http.Request, user *User) {
-}
-
-func handleDeletePrice(w http.ResponseWriter, r *http.Request, user *User) {
-}
-
-func handleGetProducts(w http.ResponseWriter, r *http.Request, user *User) {
-}
-
-func handlePostProducts(w http.ResponseWriter, r *http.Request, user *User) {
-}
-
-func handlePutProduct(w http.ResponseWriter, r *http.Request, user *User) {
-}
-
-func handleDeleteProduct(w http.ResponseWriter, r *http.Request, user *User) {
-}
-
-func handleGetProductFields(w http.ResponseWriter, r *http.Request, user *User) {
-}
-
-func handlePostProductFields(w http.ResponseWriter, r *http.Request, user *User) {
-}
-
-func handlePutProductField(w http.ResponseWriter, r *http.Request, user *User) {
-}
-
-func handleDeleteProductField(w http.ResponseWriter, r *http.Request, user *User) {
-}
-
-func handleGetPushNotifications(w http.ResponseWriter, r *http.Request, user *User) {
-}
-
-func handlePostPushNotifications(w http.ResponseWriter, r *http.Request, user *User) {
-}
-
-func handlePutPushNotification(w http.ResponseWriter, r *http.Request, user *User) {
-}
-
-func handleDeletePushNotification(w http.ResponseWriter, r *http.Request, user *User) {
-}
+// --- STAGES ---
 
 func handleGetStages(w http.ResponseWriter, r *http.Request, user *User) {
 	workflowID := r.URL.Query().Get("workflow_id")
-
 	if workflowID == "" {
 		workflowID = user.ActiveWorkflowID
 	}
@@ -2079,6 +1913,8 @@ func handleDeleteStage(w http.ResponseWriter, r *http.Request, user *User) {
 	w.Write(must(json.Marshal("ok")))
 }
 
+// --- TIME ENTRIES ---
+
 func handleGetTimeEntry(w http.ResponseWriter, r *http.Request, user *User) {
 	vars := mux.Vars(r)
 	ID := vars["id"]
@@ -2116,7 +1952,6 @@ func handleGetTimeEntries(w http.ResponseWriter, r *http.Request, user *User) {
 	}
 
 	format := r.URL.Query().Get("format")
-
 	if "csv" != format {
 		w.Write(must(json.Marshal(models)))
 		return
@@ -2224,6 +2059,8 @@ func handleDeleteTimeEntry(w http.ResponseWriter, r *http.Request, user *User) {
 	w.Write(must(json.Marshal("ok")))
 }
 
+// --- TOKEN LOGIN ---
+
 func handleGetTokenLogin(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	token := vars["api_token"]
@@ -2245,6 +2082,8 @@ func handleGetTokenLogin(w http.ResponseWriter, r *http.Request) {
 
 	http.Redirect(w, r, "/", http.StatusFound)
 }
+
+// --- USER EVENTS ---
 
 func handleGetUserEvents(w http.ResponseWriter, r *http.Request, user *User) {
 	models, err := selectUserEventsByUser(user.ID)
