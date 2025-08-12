@@ -14,8 +14,11 @@ func googleOauthConf() *oauth2.Config {
 		ClientSecret: os.Getenv("SUPERWORK_GOOGLE_CLIENT_SECRET"),
 		RedirectURL:  os.Getenv("SUPERWORK_GOOGLE_REDIRECT"),
 		Scopes: []string{
-			"https://www.googleapis.com/auth/userinfo.profile",
-			"https://www.googleapis.com/auth/userinfo.email",
+            "openid",
+            "https://www.googleapis.com/auth/userinfo.profile",
+            "https://www.googleapis.com/auth/userinfo.email",
+},
+
 		},
 		Endpoint: google.Endpoint,
 	}
@@ -30,3 +33,4 @@ func facebookOauthConf() *oauth2.Config {
 		Endpoint:     facebook.Endpoint,
 	}
 }
+
