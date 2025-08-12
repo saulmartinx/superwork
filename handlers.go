@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -33,42 +32,25 @@ func handleGetGoogleLoginURL(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(url))
 }
 
-func handleGetOauthCallbackGoogle(w http.ResponseWriter, r *http.Request) {
-	conf := googleOauthConf()
-
+func handleGetOauthCallback(url string, conf *oauth2.Config, w http.ResponseWriter, r *http.Request) {
 	code := r.URL.Query().Get("code")
-	if code == "" {
-		http.Error(w, "missing code", http.StatusBadRequest)
+	state := r.URL.Query().Get("state")
+
+	session, _ := store.Get(r, sessionName)
+	if session.Values["login_state"] != state {
+		log.Println("Invalid oauth login state, expected", session.Values["login_state"], "but got", state)
+		http.Error(w, "Invalid oauth login state", http.StatusBadRequest)
 		return
 	}
+	session.Values["login_state"] = nil
+	session.Save(r, w)
 
-	ctx := context.Background()
-	tok, err := conf.Exchange(ctx, code)
+	tok, err := conf.Exchange(oauth2.NoContext, code)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("token exchange failed: %v", err), http.StatusBadRequest)
+		log.Println(err)
+		http.Error(w, "Error getting oauth login token", http.StatusInternalServerError)
 		return
 	}
-
-	req, _ := http.NewRequest("GET", "https://openidconnect.googleapis.com/v1/userinfo", nil)
-	req.Header.Set("Authorization", "Bearer "+tok.AccessToken)
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("userinfo request failed: %v", err), http.StatusBadGateway)
-		return
-	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != 200 {
-		http.Error(w, fmt.Sprintf("userinfo error %d: %s", resp.StatusCode, string(body)), http.StatusBadGateway)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.Write(body)
-}
-
 
 	log.Println("getting oauth data from", url)
 
